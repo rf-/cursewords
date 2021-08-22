@@ -7,6 +7,7 @@ import sys
 import time
 import textwrap
 import threading
+import json
 
 import puz
 
@@ -51,10 +52,11 @@ class Cell:
 
 
 class Grid:
-    def __init__(self, grid_x, grid_y, term):
+    def __init__(self, grid_x, grid_y, term, message_bus):
         self.grid_x = grid_x
         self.grid_y = grid_y
         self.term = term
+        self.message_bus = message_bus
 
         self.notification_area = (term.height-2, self.grid_x)
 
@@ -241,6 +243,7 @@ class Grid:
         if cell.is_blankish() or not cell.is_correct():
             cell.entry = cell.solution
             cell.revealed = True
+            self.publish_cell_update(pos, cell)
             self.draw_cell(pos)
 
     def reveal_cells(self, pos_list):
@@ -251,6 +254,7 @@ class Grid:
         cell = self.cells.get(pos)
         if not cell.is_blank() and not cell.is_correct():
             cell.marked_wrong = True
+            self.publish_cell_update(pos, cell)
             self.draw_cell(pos)
 
     def check_cells(self, pos_list):
@@ -364,6 +368,15 @@ class Grid:
 
     def clear_notification_area(self):
         print(self.term.move(*self.notification_area) + self.term.clear_eol)
+
+    def publish_cell_update(self, pos, cell):
+        if self.message_bus:
+            self.message_bus.write([pos, cell.__dict__])
+
+    def apply_cell_update(self, pos, cell_dict):
+        cell = self.cells.get(pos)
+        for key in cell_dict:
+            setattr(cell, key, cell_dict[key])
 
 
 class Cursor:
@@ -626,6 +639,29 @@ class Timer(threading.Thread):
         self.is_running = True
 
 
+class MessageBus:
+    def __init__(self, shared_session_path):
+        self.log_out = open(
+            shared_session_path,
+            mode='a',
+            buffering=1)
+        self.log_in = open(
+            shared_session_path,
+            mode='r',
+            buffering=1)
+
+    def write(self, message):
+        self.log_out.write(json.dumps(message) + "\n")
+
+    def read(self):
+        updates = []
+        while True:
+            next_line = self.log_in.readline()
+            if not next_line: break
+            updates.append(json.loads(next_line))
+        return updates
+
+
 def main():
     version_dir = os.path.abspath(os.path.dirname((__file__)))
     version_file = os.path.join(version_dir, 'version')
@@ -640,11 +676,14 @@ def main():
             help="""path of puzzle file in the AcrossLite .puz format""")
     parser.add_argument('--downs-only', action='store_true',
             help="""displays only the down clues""")
+    parser.add_argument('--shared-session-path',
+            help="""create or join a shared session at the given path""")
     parser.add_argument('--version', action='version', version=version)
 
     args = parser.parse_args()
     filename = args.filename
     downs_only = args.downs_only
+    shared_session_path = args.shared_session_path
 
     try:
         puzfile = puz.read(filename)
@@ -653,10 +692,14 @@ def main():
 
     term = Terminal()
 
+    message_bus = None
+    if args.shared_session_path:
+        message_bus = MessageBus(args.shared_session_path)
+
     grid_x = 2
     grid_y = 4
 
-    grid = Grid(grid_x, grid_y, term)
+    grid = Grid(grid_x, grid_y, term, message_bus)
     grid.load(puzfile)
 
     puzzle_width = max(4 * grid.column_count, 40)
@@ -773,8 +816,17 @@ def main():
 
     with term.raw(), term.hidden_cursor():
         while not to_quit:
-            # First up we draw all the necessary stuff. If the current word
-            # is different from the word the last time through the loop:
+            # First, if we're in a shared session, check the message bus so we
+            # can apply any pending updates.
+            if message_bus:
+                for update in message_bus.read():
+                    pos = tuple(update[0])
+                    cell = update[1]
+                    grid.apply_cell_update(pos, cell)
+                    grid.draw_cell(pos)
+
+            # Then we draw all the necessary stuff. If the current word is
+            # different from the word the last time through the loop:
             if cursor.current_word() is not old_word:
                 overwrite_mode = False
                 for pos in old_word:
@@ -782,7 +834,7 @@ def main():
                 for pos in cursor.current_word():
                     grid.draw_highlighted_cell(pos)
 
-            # Draw the clue for the new word:
+                # Draw the clue for the new word:
                 if cursor.direction == "across":
                     num_index = grid.across_words.index(
                             cursor.current_word())
@@ -834,13 +886,17 @@ def main():
                                         for pos in grid.cells)
 
             # Where the magic happens: get key input
-            keypress = term.inkey()
+            keypress = term.inkey(0.25 if message_bus else None)
 
             old_position = cursor.position
             old_word = cursor.current_word()
 
+            # timeout -- reset the loop so we check the message bus again
+            if not keypress:
+                pass
+
             # ctrl-q
-            if keypress == chr(17):
+            elif keypress == chr(17):
                 to_quit = grid.confirm_quit(modified_since_save)
                 if not to_quit:
                     grid.send_notification("Quit command canceled.")
@@ -933,6 +989,7 @@ def main():
                         cell = grid.cells.get(pos)
                         if cell.is_letter():
                             cell.clear()
+                            grid.publish_cell_update(pos, cell)
                             grid.draw_cell(pos)
                     old_word = []
                     modified_since_save = True
@@ -973,6 +1030,7 @@ def main():
                 if current_cell.marked_wrong:
                     current_cell.marked_wrong = False
                     current_cell.corrected = True
+                grid.publish_cell_update(cursor.position, current_cell)
                 modified_since_save = True
                 cursor.advance_within_word(overwrite_mode, wrap_mode=True)
 
