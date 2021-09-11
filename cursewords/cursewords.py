@@ -174,41 +174,109 @@ class Grid:
         else:
             self.start_time, self.timer_active = 0, 1
 
+
     def render_grid(self, empty=False, blank=False, solution=False):
+        def get_neighbors(pos, deltas):
+            return [
+                self.cells.get((pos[0] + delta[0], pos[1] + delta[1]))
+                for delta in deltas
+            ]
+
+        def is_block(cell):
+            return cell and cell.is_block
+
+        def top_left_char(pos):
+            cells = get_neighbors(
+                pos,
+                [(x, y) for y in range(-1, 1) for x in range(-1, 1)]
+            )
+            if all(is_block(cell) for cell in cells):
+                return characters.fullblock
+            if pos == (0, 0):
+                return characters.ulcorner
+            if pos == (0, self.row_count):
+                return characters.llcorner
+            if pos == (self.column_count, 0):
+                return characters.urcorner
+            if pos == (self.column_count, self.row_count):
+                return characters.lrcorner
+            if pos[0] == 0:
+                return characters.ltee
+            if pos[0] == self.column_count:
+                return characters.rtee
+            if pos[1] == 0:
+                return characters.ttee
+            if pos[1] == self.row_count:
+                return characters.btee
+            return characters.bigplus
+
+        def left_char(pos):
+            if empty:
+                return characters.vline
+
+            cells = get_neighbors(pos, [(-1, 0), (0, 0)])
+            if all(is_block(cell) for cell in cells):
+                return characters.fullblock
+
+            return characters.vline
+
+        def render_block(split_left=True, split_right=True):
+            return ''.join([
+                characters.rhblock if split_left else characters.fullblock,
+                characters.fullblock,
+                characters.lhblock if split_right else characters.fullblock,
+            ])
+
+        def top_chars(pos, number=None):
+            if empty:
+                return characters.hline * 3
+
+            if number is not None:
+                small = str(number).translate(characters.small_nums)
+
+                # This is the right way to do it but as long as I'm doing
+                # the weird term.dim dance I have to write it a little uglier
+                # rows[0] += f'{small:{characters.hline}<3.3}'
+                return (self.term.normal +
+                        small +
+                        self.term.dim +
+                        characters.hline * (3 - len(small)))
+
+            # Six cells surrounding this edge, left to right and top to bottom
+            cells = get_neighbors(
+                pos,
+                [(x, y) for y in range(-1, 1) for x in range(-1, 2)]
+            )
+            split_left = not (is_block(cells[0]) and is_block(cells[3]))
+            should_render_block = is_block(cells[1]) and is_block(cells[4])
+            split_right = not (is_block(cells[2]) and is_block(cells[5]))
+
+            if should_render_block:
+                return render_block(split_left, split_right)
+            else:
+                return characters.hline * 3
+
+        def block_chars(pos):
+            cells = get_neighbors(pos, [(-1, 0), (1, 0)])
+            split_left = not (cells[0] and cells[0].is_block)
+            split_right = not (cells[1] and cells[1].is_block)
+            return render_block(split_left, split_right)
+
         grid_rows = []
         for i in range(self.row_count):
             rows = [self.term.dim, self.term.dim]
             for j in range(self.column_count):
                 pos = (j, i)
                 cell = self.cells.get(pos)
-                if i == 0 and j == 0:
-                    rows[0] += characters.ulcorner
-                elif j == 0:
-                    rows[0] += characters.ltee
-                elif i == 0:
-                    rows[0] += characters.ttee
-                else:
-                    rows[0] += characters.bigplus
+                rows[0] += top_left_char(pos)
+                rows[1] += left_char(pos)
 
-                rows[1] += characters.vline
-
-                if cell.number and not empty:
-                    small = str(cell.number).translate(characters.small_nums)
-                else:
-                    small = ''
-
-                # This is the right way to do it but as long as I'm doing
-                # the weird term.dim dance I have to write it a little uglier
-                # rows[0] += f'{small:{characters.hline}<3.3}'
-                rows[0] += (self.term.normal +
-                            small +
-                            self.term.dim +
-                            characters.hline * (3 - len(small)))
+                rows[0] += top_chars(pos, cell and cell.number)
 
                 if empty:
                     rows[1] += '   '
                 elif cell.is_block:
-                    rows[1] += characters.squareblock
+                    rows[1] += block_chars(pos)
                 elif blank:
                     rows[1] += '   '
                 elif solution:
@@ -220,19 +288,18 @@ class Grid:
                     rows[1] += self.term.normal + ' ' + value + self.term.dim
 
                 if j == self.column_count - 1:
-                    if i == 0:
-                        rows[0] += characters.urcorner
-                    else:
-                        rows[0] += characters.rtee
-                    rows[1] += characters.vline + self.term.normal
-                    rows[0] += self.term.normal
+                    rows[0] += top_left_char((j + 1, i)) + self.term.normal
+                    rows[1] += left_char((j + 1, i)) + self.term.normal
+
             grid_rows.extend(rows)
 
-        bottom_row = self.term.dim + characters.llcorner
-        for col in range(1, self.column_count * 4):
-            bottom_row += characters.btee if col % 4 == 0 else characters.hline
-        bottom_row += characters.lrcorner + self.term.normal
+        bottom_row = self.term.dim
+        for col in range(self.column_count + 1):
+            bottom_row += top_left_char((col, self.row_count))
+            if col < self.column_count:
+                bottom_row += top_chars((col, self.row_count))
 
+        bottom_row += self.term.normal
         grid_rows.append(bottom_row)
 
         return grid_rows
